@@ -107,6 +107,7 @@ class AirLLMLlamaNemotron:
         import pstats
         import io
         from contextlib import redirect_stdout
+        import time
 
         def profile_code(func):
             def wrapper(*args, **kwargs):
@@ -150,6 +151,7 @@ class AirLLMLlamaNemotron:
 
         @profile_code
         async def async_generate(input_text, **kwargs):
+            start_time = time.time()
             cache_key = get_cache_key(input_text)
             cached_result = load_from_cache(cache_key)
             if cached_result:
@@ -174,6 +176,9 @@ class AirLLMLlamaNemotron:
             
             result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
             save_to_cache(cache_key, result)
+            end_time = time.time()
+            duration = end_time - start_time
+            print(f"Time taken for generate: {duration} seconds")
             return result
 
         return asyncio.run(async_generate(input_text, **kwargs))
