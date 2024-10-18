@@ -90,6 +90,13 @@ class AirLLMLlamaNemotron:
         self.model.gradient_checkpointing_enable()  # Enable gradient checkpointing to reduce memory usage
         self.model.config.use_cache = False  # Disable caching to save memory
         self.model.config.attention_probs_dropout_prob = 0.1  # Reduce dropout for faster inference
+
+        # Convert model to TorchScript for faster inference
+        self.model = torch.jit.script(self.model)
+
+        # Use mixed precision if supported
+        if torch.cuda.is_available():
+            self.model.half()
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
         self.generation_config = GenerationConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
 
