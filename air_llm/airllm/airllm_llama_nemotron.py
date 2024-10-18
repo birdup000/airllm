@@ -98,9 +98,15 @@ class AirLLMLlamaNemotron:
         # Layer Fusion: Combine multiple layers into a single layer
         self.model = torch.jit.script(self.model)
 
+        # Mixed Precision Training
+        self.scaler = torch.cuda.amp.GradScaler()
+
         # Use mixed precision if supported
         if torch.cuda.is_available():
             self.model.half()
+
+        # Gradient Accumulation
+        self.accumulation_steps = 4
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
         self.generation_config = GenerationConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
 
@@ -127,10 +133,19 @@ class AirLLMLlamaNemotron:
                 return result
             return wrapper
 
+        # Efficient Data Loading
+        def efficient_data_loader(input_text):
+            inputs = self.tokenizer(input_text, return_tensors="pt", padding=True, truncation=True)
+            inputs = {k: v.pin_memory() for k, v in inputs.items()}
+            return inputs
+
         async def async_tokenize(input_text):
             loop = asyncio.get_event_loop()
-            inputs = await loop.run_in_executor(None, self.tokenizer, input_text, return_tensors="pt", padding=True, truncation=True)
+            inputs = await loop.run_in_executor(None, efficient_data_loader, input_text)
             return inputs
+
+        # Layer Normalization
+        self.layer_norm = torch.nn.LayerNorm(self.model.config.hidden_size)
 
         import hashlib
         import os
