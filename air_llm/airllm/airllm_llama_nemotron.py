@@ -17,6 +17,25 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoModel, GenerationMixin, LlamaForCausalLM, GenerationConfig
 from torch.cuda.amp import autocast
 from transformers.models.llama.modeling_llama import LlamaAttention
+import torch.nn.functional as F
+import math
+
+class EfficientLlamaAttention(LlamaAttention):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_value=None, use_cache=False, output_attentions=False):
+        # Efficient attention mechanism
+        query_layer = self.query(hidden_states)
+        key_layer = self.key(hidden_states)
+        value_layer = self.value(hidden_states)
+
+        # Scaled dot-product attention
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        if attention_mask is not None:
+            attention_scores = attention_scores + attention_mask
+
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        context_layer = torch.matmul(attention_probs, value_layer)
+
+        return context_layer
 from .utils import clean_memory, load_layer, find_or_create_local_splitted_path
 
 @dataclass
@@ -68,6 +87,7 @@ class AirLLMLlamaNemotron:
         self.model_args = get_model_args_from_config(self.config)
         self.model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
         self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.Linear}, dtype=torch.qint8)
+        self.model.gradient_checkpointing_enable()  # Enable gradient checkpointing to reduce memory usage
         self.model.config.use_cache = False  # Disable caching to save memory
         self.model.config.attention_probs_dropout_prob = 0.1  # Reduce dropout for faster inference
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
