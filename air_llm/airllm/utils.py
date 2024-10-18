@@ -80,6 +80,9 @@ def clean_memory():
         # maybe platform
         pass
     torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 def uncompress_layer_state_dict(layer_state_dict):

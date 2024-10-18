@@ -1,4 +1,5 @@
 import importlib
+import torch
 from transformers import AutoConfig
 from sys import platform
 
@@ -51,6 +52,10 @@ class AutoModel:
 
         if is_on_mac_os:
             return AirLLMLlamaMlx(pretrained_model_name_or_path, *inputs, ** kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.synchronize()
 
         module, cls = AutoModel.get_module_class(pretrained_model_name_or_path, *inputs, **kwargs)
         module = importlib.import_module(module)

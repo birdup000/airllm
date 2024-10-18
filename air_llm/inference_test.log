@@ -1,0 +1,58 @@
+>>>> cache_utils installed
+Fetching 8 files:   0%|          | 0/8 [00:00<?, ?it/s]Fetching 8 files: 100%|██████████| 8/8 [00:00<00:00, 79701.74it/s]
+found_layers:{'model.embed_tokens.': False, 'model.layers.0.': False, 'model.layers.1.': False, 'model.layers.2.': False, 'model.layers.3.': False, 'model.layers.4.': False, 'model.layers.5.': False, 'model.layers.6.': False, 'model.layers.7.': False, 'model.layers.8.': False, 'model.layers.9.': False, 'model.layers.10.': False, 'model.layers.11.': False, 'model.layers.12.': False, 'model.layers.13.': False, 'model.layers.14.': False, 'model.layers.15.': False, 'model.layers.16.': False, 'model.layers.17.': False, 'model.layers.18.': False, 'model.layers.19.': False, 'model.layers.20.': False, 'model.layers.21.': False, 'model.layers.22.': False, 'model.layers.23.': False, 'model.layers.24.': False, 'model.layers.25.': False, 'model.layers.26.': False, 'model.layers.27.': False, 'model.layers.28.': False, 'model.layers.29.': False, 'model.layers.30.': False, 'model.layers.31.': False, 'model.layers.32.': False, 'model.layers.33.': False, 'model.layers.34.': False, 'model.layers.35.': False, 'model.layers.36.': False, 'model.layers.37.': False, 'model.layers.38.': False, 'model.layers.39.': False, 'model.layers.40.': False, 'model.layers.41.': False, 'model.layers.42.': False, 'model.layers.43.': False, 'model.layers.44.': False, 'model.layers.45.': False, 'model.layers.46.': False, 'model.layers.47.': False, 'model.layers.48.': False, 'model.layers.49.': False, 'model.layers.50.': False, 'model.layers.51.': False, 'model.layers.52.': False, 'model.layers.53.': False, 'model.layers.54.': False, 'model.layers.55.': False, 'model.layers.56.': False, 'model.layers.57.': False, 'model.layers.58.': False, 'model.layers.59.': False, 'model.layers.60.': False, 'model.layers.61.': False, 'model.layers.62.': False, 'model.layers.63.': False, 'model.layers.64.': False, 'model.layers.65.': False, 'model.layers.66.': False, 'model.layers.67.': False, 'model.layers.68.': False, 'model.layers.69.': False, 'model.layers.70.': False, 'model.layers.71.': False, 'model.layers.72.': False, 'model.layers.73.': False, 'model.layers.74.': False, 'model.layers.75.': False, 'model.layers.76.': False, 'model.layers.77.': False, 'model.layers.78.': False, 'model.layers.79.': False, 'model.norm.': False, 'lm_head.': False}
+some layer splits found, some are not, re-save all layers in case there's some corruptions.
+  0%|          | 0/83 [00:00<?, ?it/s]Loading shard 1/30
+
+Fetching 1 files:   0%|          | 0/1 [00:00<?, ?it/s][A/usr/local/lib/python3.10/dist-packages/huggingface_hub/file_download.py:983: UserWarning: Not enough free disk space to download the file. The expected file size is: 4584.41 MB. The target location /home/user/.cache/huggingface/hub/models--nvidia--Llama-3.1-Nemotron-70B-Instruct-HF/blobs only has 4005.77 MB free disk space.
+  warnings.warn(
+Fetching 1 files:   0%|          | 0/1 [00:20<?, ?it/s]
+  0%|          | 0/83 [00:20<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/user/airllm/air_llm/inference_example.py", line 5, in <module>
+    model = AutoModel.from_pretrained('nvidia/Llama-3.1-Nemotron-70B-Instruct-HF')
+  File "/home/user/airllm/air_llm/airllm/auto_model.py", line 63, in from_pretrained
+    return class_(pretrained_model_name_or_path, *inputs, ** kwargs)
+  File "/home/user/airllm/air_llm/airllm/airllm.py", line 12, in __init__
+    super(AirLLMLlama2, self).__init__(*args, **kwargs)
+  File "/home/user/airllm/air_llm/airllm/airllm_base.py", line 108, in __init__
+    self.model_local_path, self.checkpoint_path = find_or_create_local_splitted_path(model_local_path_or_repo_id,
+  File "/home/user/airllm/air_llm/airllm/utils.py", line 404, in find_or_create_local_splitted_path
+    return Path(hf_cache_path), split_and_save_layers(hf_cache_path, layer_shards_saving_path,
+  File "/home/user/airllm/air_llm/airllm/utils.py", line 295, in split_and_save_layers
+    huggingface_hub.snapshot_download(repo_id, allow_patterns=os.path.basename(to_load),
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/_snapshot_download.py", line 290, in snapshot_download
+    thread_map(
+  File "/usr/local/lib/python3.10/dist-packages/tqdm/contrib/concurrent.py", line 69, in thread_map
+    return _executor_map(ThreadPoolExecutor, fn, *iterables, **tqdm_kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/tqdm/contrib/concurrent.py", line 51, in _executor_map
+    return list(tqdm_class(ex.map(fn, *iterables, chunksize=chunksize), **kwargs))
+  File "/usr/local/lib/python3.10/dist-packages/tqdm/std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "/usr/lib/python3.10/concurrent/futures/_base.py", line 621, in result_iterator
+    yield _result_or_cancel(fs.pop())
+  File "/usr/lib/python3.10/concurrent/futures/_base.py", line 319, in _result_or_cancel
+    return fut.result(timeout)
+  File "/usr/lib/python3.10/concurrent/futures/_base.py", line 458, in result
+    return self.__get_result()
+  File "/usr/lib/python3.10/concurrent/futures/_base.py", line 403, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/_snapshot_download.py", line 264, in _inner_hf_hub_download
+    return hf_hub_download(
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/utils/_deprecation.py", line 101, in inner_f
+    return f(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/file_download.py", line 1232, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/file_download.py", line 1381, in _hf_hub_download_to_cache_dir
+    _download_to_tmp_and_move(
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/file_download.py", line 1915, in _download_to_tmp_and_move
+    http_get(
+  File "/usr/local/lib/python3.10/dist-packages/huggingface_hub/file_download.py", line 544, in http_get
+    temp_file.write(chunk)
+OSError: [Errno 28] No space left on device
