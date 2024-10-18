@@ -109,7 +109,32 @@ class AirLLMLlamaNemotron:
             inputs = await loop.run_in_executor(None, self.tokenizer, input_text, return_tensors="pt", padding=True, truncation=True)
             return inputs
 
+        import hashlib
+        import os
+        import pickle
+
+        def get_cache_key(input_text):
+            return hashlib.md5(input_text.encode()).hexdigest()
+
+        def load_from_cache(cache_key):
+            cache_path = os.path.join("cache", cache_key)
+            if os.path.exists(cache_path):
+                with open(cache_path, "rb") as cache_file:
+                    return pickle.load(cache_file)
+            return None
+
+        def save_to_cache(cache_key, result):
+            cache_path = os.path.join("cache", cache_key)
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, "wb") as cache_file:
+                pickle.dump(result, cache_file)
+
         async def async_generate(input_text, **kwargs):
+            cache_key = get_cache_key(input_text)
+            cached_result = load_from_cache(cache_key)
+            if cached_result:
+                return cached_result
+
             inputs = await async_tokenize(input_text)
             
             # Batch processing
@@ -124,6 +149,8 @@ class AirLLMLlamaNemotron:
             # Clean memory
             clean_memory()
             
-            return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            save_to_cache(cache_key, result)
+            return result
 
         return asyncio.run(async_generate(input_text, **kwargs))
