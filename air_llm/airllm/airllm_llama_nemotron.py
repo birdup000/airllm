@@ -15,6 +15,8 @@ from .persist import ModelPersister
 import psutil
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoModel, GenerationMixin, LlamaForCausalLM, GenerationConfig
+from torch.cuda.amp import autocast
+from transformers.models.llama.modeling_llama import LlamaAttention
 from .utils import clean_memory, load_layer, find_or_create_local_splitted_path
 
 @dataclass
@@ -66,6 +68,8 @@ class AirLLMLlamaNemotron:
         self.model_args = get_model_args_from_config(self.config)
         self.model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
         self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.Linear}, dtype=torch.qint8)
+        self.model.config.use_cache = False  # Disable caching to save memory
+        self.model.config.attention_probs_dropout_prob = 0.1  # Reduce dropout for faster inference
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
         self.generation_config = GenerationConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
 
@@ -77,8 +81,10 @@ class AirLLMLlamaNemotron:
         batch_size = 8
         input_ids = inputs['input_ids'].repeat(batch_size, 1).cuda()
         
-        # Generate outputs
-        outputs = self.model.generate(input_ids, **kwargs)
+        # Use mixed precision
+        with autocast():
+            # Generate outputs
+            outputs = self.model.generate(input_ids, **kwargs)
         
         # Clean memory
         clean_memory()
