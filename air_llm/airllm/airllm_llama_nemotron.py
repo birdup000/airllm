@@ -13,6 +13,7 @@ import mlx.nn as nn
 from sentencepiece import SentencePieceProcessor
 from .persist import ModelPersister
 import psutil
+import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoModel, GenerationMixin, LlamaForCausalLM, GenerationConfig
 from .utils import clean_memory, load_layer, find_or_create_local_splitted_path
 
@@ -64,10 +65,22 @@ class AirLLMLlamaNemotron:
         self.config = AutoConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
         self.model_args = get_model_args_from_config(self.config)
         self.model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+        self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.Linear}, dtype=torch.qint8)
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
         self.generation_config = GenerationConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
 
     def generate(self, input_text, **kwargs):
-        inputs = self.tokenizer(input_text, return_tensors="pt")
-        outputs = self.model.generate(**inputs, **kwargs)
+        # Efficient tokenization
+        inputs = self.tokenizer(input_text, return_tensors="pt", padding=True, truncation=True)
+        
+        # Batch processing
+        batch_size = 8
+        input_ids = inputs['input_ids'].repeat(batch_size, 1).cuda()
+        
+        # Generate outputs
+        outputs = self.model.generate(input_ids, **kwargs)
+        
+        # Clean memory
+        clean_memory()
+        
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
