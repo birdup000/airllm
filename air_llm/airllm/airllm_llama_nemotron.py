@@ -146,6 +146,9 @@ class AirLLMLlamaNemotron:
                 # Generate outputs
                 outputs = self.model.generate(input_ids, **kwargs)
             
+            # Clear unnecessary variables
+            del inputs, input_ids
+
             # Clean memory
             clean_memory()
             
