@@ -103,6 +103,25 @@ class AirLLMLlamaNemotron:
 
     def generate(self, input_text, **kwargs):
         import asyncio
+        import cProfile
+        import pstats
+        import io
+        from contextlib import redirect_stdout
+
+        def profile_code(func):
+            def wrapper(*args, **kwargs):
+                pr = cProfile.Profile()
+                pr.enable()
+                result = func(*args, **kwargs)
+                pr.disable()
+                s = io.StringIO()
+                sortby = 'cumulative'
+                ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
+                ps.print_stats()
+                with open("profile_stats.txt", "w") as f:
+                    f.write(s.getvalue())
+                return result
+            return wrapper
 
         async def async_tokenize(input_text):
             loop = asyncio.get_event_loop()
@@ -129,6 +148,7 @@ class AirLLMLlamaNemotron:
             with open(cache_path, "wb") as cache_file:
                 pickle.dump(result, cache_file)
 
+        @profile_code
         async def async_generate(input_text, **kwargs):
             cache_key = get_cache_key(input_text)
             cached_result = load_from_cache(cache_key)
