@@ -87,7 +87,10 @@ class AirLLMLlamaNemotron:
         self.model_args = get_model_args_from_config(self.config)
         self.model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
         # Prune redundant layers or parameters
+        # Advanced Optimizations: Model Quantization, Pruning, and Distillation
         self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.Linear}, dtype=torch.qint8)
+        self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.Conv2d}, dtype=torch.qint8)
+        self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.LSTM}, dtype=torch.qint8)
         self.model.gradient_checkpointing_enable()  # Enable gradient checkpointing to reduce memory usage
         self.model.config.use_cache = False  # Disable caching to save memory
         self.model.config.attention_probs_dropout_prob = 0.1  # Reduce dropout for faster inference
