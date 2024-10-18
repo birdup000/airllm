@@ -83,6 +83,13 @@ def clean_memory():
     torch.cuda.ipc_collect()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+    # Additional memory cleaning steps
+    if hasattr(torch.cuda, 'memory_reserved'):
+        torch.cuda.memory_reserved(0)
+    if hasattr(torch.cuda, 'memory_allocated'):
+        torch.cuda.memory_allocated(0)
+    if hasattr(torch.cuda, 'memory_stats'):
+        torch.cuda.memory_stats()
 
 
 def uncompress_layer_state_dict(layer_state_dict):

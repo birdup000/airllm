@@ -10,6 +10,8 @@ class LayeredProfiler:
 
 
     def add_profiling_time(self, item, time):
+        # Log the profiling time
+        print(f"Profiling {item} at {time}")
 
         if not item in self.profiling_time_dict:
             self.profiling_time_dict[item] = []

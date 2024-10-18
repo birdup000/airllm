@@ -56,6 +56,13 @@ class AutoModel:
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             torch.cuda.synchronize()
+            # Additional memory optimization steps
+            if hasattr(torch.cuda, 'memory_reserved'):
+                torch.cuda.memory_reserved(0)
+            if hasattr(torch.cuda, 'memory_allocated'):
+                torch.cuda.memory_allocated(0)
+            if hasattr(torch.cuda, 'memory_stats'):
+                torch.cuda.memory_stats()
 
         module, cls = AutoModel.get_module_class(pretrained_model_name_or_path, *inputs, **kwargs)
         module = importlib.import_module(module)
