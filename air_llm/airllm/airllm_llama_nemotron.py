@@ -102,19 +102,28 @@ class AirLLMLlamaNemotron:
         self.generation_config = GenerationConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
 
     def generate(self, input_text, **kwargs):
-        # Efficient tokenization
-        inputs = self.tokenizer(input_text, return_tensors="pt", padding=True, truncation=True)
-        
-        # Batch processing
-        batch_size = 8
-        input_ids = inputs['input_ids'].repeat(batch_size, 1).cuda()
-        
-        # Use mixed precision
-        with autocast():
-            # Generate outputs
-            outputs = self.model.generate(input_ids, **kwargs)
-        
-        # Clean memory
-        clean_memory()
-        
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        import asyncio
+
+        async def async_tokenize(input_text):
+            loop = asyncio.get_event_loop()
+            inputs = await loop.run_in_executor(None, self.tokenizer, input_text, return_tensors="pt", padding=True, truncation=True)
+            return inputs
+
+        async def async_generate(input_text, **kwargs):
+            inputs = await async_tokenize(input_text)
+            
+            # Batch processing
+            batch_size = 8
+            input_ids = inputs['input_ids'].repeat(batch_size, 1).cuda()
+            
+            # Use mixed precision
+            with autocast():
+                # Generate outputs
+                outputs = self.model.generate(input_ids, **kwargs)
+            
+            # Clean memory
+            clean_memory()
+            
+            return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        return asyncio.run(async_generate(input_text, **kwargs))
