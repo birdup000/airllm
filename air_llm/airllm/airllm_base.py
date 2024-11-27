@@ -1,4 +1,3 @@
-
 from typing import List, Optional, Tuple, Union
 from tqdm import tqdm
 from pathlib import Path
@@ -482,7 +481,7 @@ class AirLLMBaseModel(GenerationMixin):
                         #for param_name, param in state_dict.items():
                         #    state_dict[param_name] = param.to('cuda', non_blocking=True)
 
-                        if self.profiling_mode:
+                        if self.profil_mode:
                             elapsed_time = time.time() - t
                             self.profiler.add_profiling_time('kick_off_load_cpu', elapsed_time)
 
@@ -502,7 +501,7 @@ class AirLLMBaseModel(GenerationMixin):
                     if layer_name == self.layer_names_dict['embed']:
                         batch[j] = layer(seq)
                     elif layer_name == self.layer_names_dict['norm']:
-                        #batch[j] = layer(seq[torch.arange(n_seq), batch_eos[j]][:, None])
+                        #batch[j] = layer(seq[torch.arange(n_seq), batch_eos[j]][[:, None])
                         batch[j] = self.run_norm(layer, seq)
 
                         if output_attentions:
@@ -621,23 +620,79 @@ class AirLLMBaseModel(GenerationMixin):
             return tuple(v for v in [logits,
                                      tuple(kv_cache_list) if kv_cache_list is not None else None,
                                      tuple(all_hidden_states) if all_hidden_states is not None else None,
-                                     tuple(all_self_attns) if all_self_attns is not None else None] if v is not None)
+                                     tuple(all_self_attns) if all_hidden_states is not None else None] if v is not None)
+        # Modified forward method section
         if self.profiling_mode:
-            forward_elapsed_time = time.process_time() - forward_start
-            forward_elapsed_time_wall = time.time() - forward_start_wall
-            self.profiler.print_profiling_time()
+            # Create CUDA stream for parallel profiling
+            prof_stream = torch.cuda.Stream()
 
+            with torch.cuda.stream(prof_stream):
+                forward_elapsed_time = time.process_time() - forward_start
+                forward_elapsed_time_wall = time.time() - forward_start_wall
+                self.profiler.print_profiling_time()
 
-            print(f"total infer process time(including all above plus gpu compute): {forward_elapsed_time:.04f}")
-            print(f"total infer wall time(including all above plus gpu compute): {forward_elapsed_time_wall:.04f}")
+                print(f"total infer process time(including all above plus gpu compute): {forward_elapsed_time:.04f}")
+                print(f"total infer wall time(including all above plus gpu compute): {forward_elapsed_time_wall:.04f}")
 
-            self.profiler.clear_profiling_time()
+                self.profiler.clear_profiling_time()
 
+            # Ensure profiling operations complete
+            prof_stream.synchronize()
 
-        return CausalLMOutputWithPast(
-            loss=None,
-            logits=logits,
-            past_key_values=tuple(kv_cache_list) if kv_cache_list is not None else None,
-            hidden_states=tuple(all_hidden_states) if all_hidden_states is not None else None,
-            attentions=tuple(all_self_attns) if all_hidden_states is not None else None,
-        )
+        # Synchronize default CUDA stream before return
+        torch.cuda.current_stream().synchronize()
+
+        # Create parallel streams
+        compute_stream = torch.cuda.Stream()
+        cache_stream = torch.cuda.Stream()
+
+        # Process KV caches in parallel stream
+        with torch.cuda.stream(compute_stream):
+            for i in range(len(kv_cache_list)):
+                kv_cache_list[i] = (torch.cat(kv_cache_list[i][0], 0), torch.cat(kv_cache_list[i][1], 0))
+
+        # Process attention and hidden states in parallel
+        with torch.cuda.stream(cache_stream):
+            if output_attentions:
+                all_self_attns = all_self_attns[0:-2]
+                for i in range(len(all_self_attns)):
+                    all_self_attns[i] = torch.cat(all_self_attns[i], 0)
+
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states[0:-2]
+                for i in range(len(all_hidden_states)):
+                    all_hidden_states[i] = torch.cat(all_hidden_states[i], 0)
+
+        # Synchronize compute operations
+        compute_stream.synchronize()
+        cache_stream.synchronize()
+
+        if not return_dict:
+            return tuple(v for v in [logits,
+                                    tuple(kv_cache_list) if kv_cache_list is not None else None,
+                                    tuple(all_hidden_states) if all_hidden_states is not None else None,
+                                    tuple(all_self_attns) if all_hidden_states is not None else None] if v is not None)
+
+        if self.profiling_mode:
+            prof_stream = torch.cuda.Stream()
+            with torch.cuda.stream(prof_stream):
+                forward_elapsed_time = time.process_time() - forward_start
+                forward_elapsed_time_wall = time.time() - forward_start_wall
+                self.profiler.print_profiling_time()
+                print(f"total infer process time(including all above plus gpu compute): {forward_elapsed_time:.04f}")
+                print(f"total infer wall time(including all above plus gpu compute): {forward_elapsed_time_wall:.04f}")
+                self.profiler.clear_profiling_time()
+            prof_stream.synchronize()
+
+        # Synchronize default CUDA stream before return
+        torch.cuda.current_stream().synchronize()
+
+        # Return in main stream
+        with torch.cuda.stream(torch.cuda.current_stream()):
+            return CausalLMOutputWithPast(
+                loss=None,
+                logits=logits,
+                past_key_values=tuple(kv_cache_list) if kv_cache_list is not None else None,
+                hidden_states=tuple(all_hidden_states) if all_hidden_states is not None else None,
+                attentions=tuple(all_self_attns) if all_hidden_states is not None else None,
+            )

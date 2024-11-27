@@ -40,7 +40,7 @@ class AutoModel:
         elif "Mixtral" in config.architectures[0]:
             return "airllm", "AirLLMMixtral"
         elif "Llama-3.1-Nemotron-70B-Instruct" in config.architectures[0]:
-            return "airllm", "AirLLMLlamaNemotron"
+            return "airllm", "AirLLMLlama2"
         elif "Llama" in config.architectures[0]:
             return "airllm", "AirLLMLlama2"
         else:
