@@ -371,6 +371,41 @@ class AirLLMBaseModel(GenerationMixin):
     def get_past_key_values_cache_seq_len(self, past_key_values):
         return past_key_values[0][0].shape[2]
         
+    def combined_decode(self, logits: torch.Tensor, 
+                       n_gram_size: int = 4, 
+                       max_iterations: int = 3,
+                       lookahead_steps: int = 2, 
+                       temperature: float = 1.0,
+                       jacobi_weight: float = 0.5) -> torch.Tensor:
+        """
+        Combines Jacobi and Lookahead decoding strategies for improved generation.
+        
+        Args:
+            logits: Tensor of shape (batch_size, sequence_length, vocab_size)
+            n_gram_size: Size of n-grams for Jacobi decoding (default: 4)
+            max_iterations: Maximum Jacobi refinement iterations (default: 3)
+            lookahead_steps: Number of lookahead steps (default: 2)
+            temperature: Temperature for softmax (default: 1.0)
+            jacobi_weight: Weight for combining Jacobi and Lookahead results (default: 0.5)
+                         Higher values favor Jacobi decoding
+            
+        Returns:
+            Refined logits tensor combining both strategies
+        """
+        # Get individual decoded logits
+        jacobi_logits = self.jacobi_decode(logits, n_gram_size, max_iterations)
+        lookahead_logits = self.lookahead_decode(logits, lookahead_steps, temperature)
+        
+        # Convert to probabilities for weighted combination
+        jacobi_probs = torch.softmax(jacobi_logits, dim=-1)
+        lookahead_probs = torch.softmax(lookahead_logits, dim=-1)
+        
+        # Combine probabilities with weighted average
+        combined_probs = (jacobi_weight * jacobi_probs + 
+                         (1 - jacobi_weight) * lookahead_probs)
+        
+        return torch.log(combined_probs)  # Convert back to logits
+        
     def jacobi_decode(self, logits: torch.Tensor, n_gram_size: int = 4, max_iterations: int = 3) -> torch.Tensor:
         """
         Implements Jacobi decoding by recursively matching n-grams in the generated sequence.
@@ -750,6 +785,8 @@ class AirLLMBaseModel(GenerationMixin):
                 logits = self.jacobi_decode(logits, **decoding_kwargs)
             elif decoding_strategy == "lookahead":
                 logits = self.lookahead_decode(logits, **decoding_kwargs)
+            elif decoding_strategy == "combined":
+                logits = self.combined_decode(logits, **decoding_kwargs)
 
         return CausalLMOutputWithPast(
             loss=None,
