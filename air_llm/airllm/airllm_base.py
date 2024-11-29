@@ -1,3 +1,4 @@
+
 from typing import List, Optional, Tuple, Union
 from tqdm import tqdm
 from pathlib import Path
@@ -369,6 +370,92 @@ class AirLLMBaseModel(GenerationMixin):
 
     def get_past_key_values_cache_seq_len(self, past_key_values):
         return past_key_values[0][0].shape[2]
+        
+    def jacobi_decode(self, logits: torch.Tensor, n_gram_size: int = 4, max_iterations: int = 3) -> torch.Tensor:
+        """
+        Implements Jacobi decoding by recursively matching n-grams in the generated sequence.
+        
+        Args:
+            logits: Tensor of shape (batch_size, sequence_length, vocab_size)
+            n_gram_size: Size of n-grams to match (default: 4)
+            max_iterations: Maximum number of refinement iterations (default: 3)
+            
+        Returns:
+            Refined logits tensor
+        """
+        batch_size, seq_len, vocab_size = logits.shape
+        
+        # Initial token probabilities
+        probs = torch.softmax(logits, dim=-1)
+        
+        for _ in range(max_iterations):
+            # Create n-gram windows
+            n_gram_probs = probs.unfold(1, n_gram_size, 1)
+            
+            # Calculate n-gram similarity scores
+            similarity_scores = torch.matmul(
+                n_gram_probs.view(batch_size, -1, n_gram_size * vocab_size),
+                n_gram_probs.view(batch_size, -1, n_gram_size * vocab_size).transpose(-2, -1)
+            )
+            
+            # Update probabilities based on n-gram matches
+            refined_probs = torch.zeros_like(probs)
+            for i in range(seq_len):
+                start_idx = max(0, i - n_gram_size + 1)
+                end_idx = min(seq_len - n_gram_size + 1, i + 1)
+                
+                # Weight probabilities by similarity scores
+                window_scores = similarity_scores[:, start_idx:end_idx, start_idx:end_idx]
+                window_probs = probs[:, start_idx:end_idx]
+                
+                refined_probs[:, i] = torch.matmul(
+                    window_scores.softmax(dim=-1),
+                    window_probs
+                ).mean(dim=1)
+            
+            probs = refined_probs
+            
+        return torch.log(probs)  # Convert back to logits
+        
+    def lookahead_decode(self, logits: torch.Tensor, lookahead_steps: int = 2, temperature: float = 1.0) -> torch.Tensor:
+        """
+        Implements Lookahead decoding by leveraging correlations between generated tokens.
+        
+        Args:
+            logits: Tensor of shape (batch_size, sequence_length, vocab_size)
+            lookahead_steps: Number of steps to look ahead (default: 2)
+            temperature: Temperature for softmax (default: 1.0)
+            
+        Returns:
+            Refined logits tensor
+        """
+        batch_size, seq_len, vocab_size = logits.shape
+        
+        # Initial probabilities
+        probs = torch.softmax(logits / temperature, dim=-1)
+        
+        # Calculate token correlations
+        token_correlations = torch.matmul(probs.transpose(1, 2), probs)  # (batch_size, vocab_size, vocab_size)
+        
+        # Lookahead refinement
+        refined_probs = torch.zeros_like(probs)
+        for i in range(seq_len):
+            current_probs = probs[:, i]
+            
+            # Initialize cumulative probabilities
+            cumulative_probs = current_probs
+            
+            # Look ahead and accumulate probabilities
+            for step in range(1, lookahead_steps + 1):
+                if i + step < seq_len:
+                    next_probs = probs[:, i + step]
+                    # Weight by correlation and distance
+                    weight = 1.0 / (2 ** step)  # Exponential decay
+                    cumulative_probs += weight * torch.matmul(token_correlations, next_probs)
+            
+            refined_probs[:, i] = cumulative_probs / (1 + sum(1.0 / (2 ** s) for s in range(1, lookahead_steps + 1)))
+        
+        return torch.log(refined_probs)  # Convert back to logits
     def get_sequence_len(self, seq):
         return seq.shape[1]
 
@@ -404,7 +491,30 @@ class AirLLMBaseModel(GenerationMixin):
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
+            decoding_strategy: Optional[str] = None,
+            decoding_kwargs: Optional[dict] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        """Forward pass of the model.
+
+        Args:
+            input_ids: Input token IDs
+            attention_mask: Attention mask
+            position_ids: Position IDs
+            past_key_values: Past key values for KV cache
+            inputs_embeds: Input embeddings
+            labels: Labels for loss computation
+            use_cache: Whether to use KV cache
+            output_attentions: Whether to output attention weights
+            output_hidden_states: Whether to output hidden states
+            return_dict: Whether to return a ModelOutput object
+            decoding_strategy: Decoding strategy to use ("jacobi" or "lookahead")
+            decoding_kwargs: Keyword arguments for the chosen decoding strategy
+                For jacobi: n_gram_size (int), max_iterations (int)
+                For lookahead: lookahead_steps (int), temperature (float)
+
+        Returns:
+            CausalLMOutputWithPast or tuple: Model outputs
+        """
 
         if cache_utils_installed:
             # we don't support kv cache for new version yet
@@ -481,7 +591,7 @@ class AirLLMBaseModel(GenerationMixin):
                         #for param_name, param in state_dict.items():
                         #    state_dict[param_name] = param.to('cuda', non_blocking=True)
 
-                        if self.profil_mode:
+                        if self.profiling_mode:
                             elapsed_time = time.time() - t
                             self.profiler.add_profiling_time('kick_off_load_cpu', elapsed_time)
 
@@ -501,7 +611,7 @@ class AirLLMBaseModel(GenerationMixin):
                     if layer_name == self.layer_names_dict['embed']:
                         batch[j] = layer(seq)
                     elif layer_name == self.layer_names_dict['norm']:
-                        #batch[j] = layer(seq[torch.arange(n_seq), batch_eos[j]][[:, None])
+                        #batch[j] = layer(seq[torch.arange(n_seq), batch_eos[j]][:, None])
                         batch[j] = self.run_norm(layer, seq)
 
                         if output_attentions:
@@ -620,79 +730,31 @@ class AirLLMBaseModel(GenerationMixin):
             return tuple(v for v in [logits,
                                      tuple(kv_cache_list) if kv_cache_list is not None else None,
                                      tuple(all_hidden_states) if all_hidden_states is not None else None,
-                                     tuple(all_self_attns) if all_hidden_states is not None else None] if v is not None)
-        # Modified forward method section
+                                     tuple(all_self_attns) if all_self_attns is not None else None] if v is not None)
         if self.profiling_mode:
-            # Create CUDA stream for parallel profiling
-            prof_stream = torch.cuda.Stream()
+            forward_elapsed_time = time.process_time() - forward_start
+            forward_elapsed_time_wall = time.time() - forward_start_wall
+            self.profiler.print_profiling_time()
 
-            with torch.cuda.stream(prof_stream):
-                forward_elapsed_time = time.process_time() - forward_start
-                forward_elapsed_time_wall = time.time() - forward_start_wall
-                self.profiler.print_profiling_time()
 
-                print(f"total infer process time(including all above plus gpu compute): {forward_elapsed_time:.04f}")
-                print(f"total infer wall time(including all above plus gpu compute): {forward_elapsed_time_wall:.04f}")
+            print(f"total infer process time(including all above plus gpu compute): {forward_elapsed_time:.04f}")
+            print(f"total infer wall time(including all above plus gpu compute): {forward_elapsed_time_wall:.04f}")
 
-                self.profiler.clear_profiling_time()
+            self.profiler.clear_profiling_time()
 
-            # Ensure profiling operations complete
-            prof_stream.synchronize()
 
-        # Synchronize default CUDA stream before return
-        torch.cuda.current_stream().synchronize()
+        # Apply decoding strategy if specified
+        if decoding_strategy is not None:
+            decoding_kwargs = decoding_kwargs or {}
+            if decoding_strategy == "jacobi":
+                logits = self.jacobi_decode(logits, **decoding_kwargs)
+            elif decoding_strategy == "lookahead":
+                logits = self.lookahead_decode(logits, **decoding_kwargs)
 
-        # Create parallel streams
-        compute_stream = torch.cuda.Stream()
-        cache_stream = torch.cuda.Stream()
-
-        # Process KV caches in parallel stream
-        with torch.cuda.stream(compute_stream):
-            for i in range(len(kv_cache_list)):
-                kv_cache_list[i] = (torch.cat(kv_cache_list[i][0], 0), torch.cat(kv_cache_list[i][1], 0))
-
-        # Process attention and hidden states in parallel
-        with torch.cuda.stream(cache_stream):
-            if output_attentions:
-                all_self_attns = all_self_attns[0:-2]
-                for i in range(len(all_self_attns)):
-                    all_self_attns[i] = torch.cat(all_self_attns[i], 0)
-
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states[0:-2]
-                for i in range(len(all_hidden_states)):
-                    all_hidden_states[i] = torch.cat(all_hidden_states[i], 0)
-
-        # Synchronize compute operations
-        compute_stream.synchronize()
-        cache_stream.synchronize()
-
-        if not return_dict:
-            return tuple(v for v in [logits,
-                                    tuple(kv_cache_list) if kv_cache_list is not None else None,
-                                    tuple(all_hidden_states) if all_hidden_states is not None else None,
-                                    tuple(all_self_attns) if all_hidden_states is not None else None] if v is not None)
-
-        if self.profiling_mode:
-            prof_stream = torch.cuda.Stream()
-            with torch.cuda.stream(prof_stream):
-                forward_elapsed_time = time.process_time() - forward_start
-                forward_elapsed_time_wall = time.time() - forward_start_wall
-                self.profiler.print_profiling_time()
-                print(f"total infer process time(including all above plus gpu compute): {forward_elapsed_time:.04f}")
-                print(f"total infer wall time(including all above plus gpu compute): {forward_elapsed_time_wall:.04f}")
-                self.profiler.clear_profiling_time()
-            prof_stream.synchronize()
-
-        # Synchronize default CUDA stream before return
-        torch.cuda.current_stream().synchronize()
-
-        # Return in main stream
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            return CausalLMOutputWithPast(
-                loss=None,
-                logits=logits,
-                past_key_values=tuple(kv_cache_list) if kv_cache_list is not None else None,
-                hidden_states=tuple(all_hidden_states) if all_hidden_states is not None else None,
-                attentions=tuple(all_self_attns) if all_hidden_states is not None else None,
-            )
+        return CausalLMOutputWithPast(
+            loss=None,
+            logits=logits,
+            past_key_values=tuple(kv_cache_list) if kv_cache_list is not None else None,
+            hidden_states=tuple(all_hidden_states) if all_hidden_states is not None else None,
+            attentions=tuple(all_self_attns) if all_hidden_states is not None else None,
+        )
