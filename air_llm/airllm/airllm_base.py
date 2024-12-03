@@ -1,9 +1,10 @@
-
 from typing import List, Optional, Tuple, Union
 from tqdm import tqdm
 from pathlib import Path
 import time
 from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
+import threading
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoModel, GenerationMixin, LlamaForCausalLM, GenerationConfig
@@ -56,7 +57,7 @@ class AirLLMBaseModel(GenerationMixin):
 
     def __init__(self, model_local_path_or_repo_id, device="cuda:0", dtype=torch.float16, max_seq_len=512,
                  layer_shards_saving_path=None, profiling_mode=False, compression=None,
-                 hf_token=None, prefetching=True, delete_original=False):
+                 hf_token=None, prefetching=True, delete_original=False, enable_compressed_prefetch=False, prefetch_queue_size=2, compression_batch_size=1):
         """
         Sharded version of LlamaForCausalLM : the model is splitted into layer shards to reduce GPU memory usage.
         During the forward pass, the inputs are processed layer by layer, and the GPU memory is freed after each layer.
@@ -149,15 +150,34 @@ class AirLLMBaseModel(GenerationMixin):
         # model weights prefetch cuda stream
         self.prefetching = prefetching
 
-        if self.compression is not None:
-            self.prefetching = False
-            print(f"not support prefetching for compression for now. loading with no prepetching mode.")
+        # Remove the check that disables prefetching when compression is used
+        # if self.compression is not None:
+        #     self.prefetching = False
+        #     print(f"not support prefetching for compression for now. loading with no prepetching mode.")
 
-        # this operation should run only if gpu is available
-        if prefetching and device.startswith("cuda"):
+        # Initialize the CUDA stream if prefetching is enabled
+        if self.prefetching and device.startswith("cuda"):
             self.stream = torch.cuda.Stream()
         else:
             self.stream = None
+
+        # Add new compression prefetching settings
+        self.enable_compressed_prefetch = enable_compressed_prefetch
+        self.prefetch_queue_size = prefetch_queue_size
+        self.compression_batch_size = compression_batch_size
+
+        # Initialize prefetching queue for compressed layers
+        if self.enable_compressed_prefetch:
+            self.prefetch_queue = Queue(maxsize=self.prefetch_queue_size)
+            self.prefetch_thread = None
+
+        # Initialize threading components
+        self.prefetch_thread = None
+        self.prefetch_queue = None
+        self.thread_running = False
+
+        if prefetching:
+            self.prefetch_queue = Queue(maxsize=prefetch_queue_size)
 
     # if derived class needs to create generation config differently, like Mistrial, this function can be overridden
     def get_generation_config(self):
@@ -267,35 +287,26 @@ class AirLLMBaseModel(GenerationMixin):
         self.move_layer_to_device(state_dict)
 
     def load_layer_to_cpu(self, layer_name):
-
         t = time.time()
-
         load_layer_output = load_layer(self.checkpoint_path, layer_name, self.profiling_mode)
         elapsed_time = time.time() - t
 
         if self.profiling_mode:
             state_dict, compression_time = load_layer_output
             disk_loading_time = elapsed_time - compression_time
-
             self.profiler.add_profiling_time('load_safe_tensor', disk_loading_time)
-
             self.profiler.add_profiling_time('compression_time', compression_time)
         else:
             state_dict = load_layer_output
 
-        # pin memory:
-        if self.prefetching:
-            t = time.time()
-            if torch.cuda.is_available():  # Check if CUDA is available
-                for k in state_dict.keys():
-                    state_dict[k].pin_memory()
-            else:
-                # For CPU, no action is needed, but you could optionally add a log or message
-                print("Prefetching is enabled, but no pin_memory operation is needed for CPU.")
-
-            elapsed_time = time.time() - t
-            if self.profiling_mode:
-                self.profiler.add_profiling_time('pin_memory_to_trigger_load', elapsed_time)
+        # Ensure tensors are on CPU before pinning
+        for k in state_dict.keys():
+            # Check if tensor is not on CPU
+            if state_dict[k].device.type != 'cpu':
+                state_dict[k] = state_dict[k].to('cpu')
+            # Pin memory
+            if self.prefetching:
+                state_dict[k].pin_memory()
 
         return state_dict
 
@@ -370,127 +381,6 @@ class AirLLMBaseModel(GenerationMixin):
 
     def get_past_key_values_cache_seq_len(self, past_key_values):
         return past_key_values[0][0].shape[2]
-        
-    def combined_decode(self, logits: torch.Tensor, 
-                       n_gram_size: int = 4, 
-                       max_iterations: int = 3,
-                       lookahead_steps: int = 2, 
-                       temperature: float = 1.0,
-                       jacobi_weight: float = 0.5) -> torch.Tensor:
-        """
-        Combines Jacobi and Lookahead decoding strategies for improved generation.
-        
-        Args:
-            logits: Tensor of shape (batch_size, sequence_length, vocab_size)
-            n_gram_size: Size of n-grams for Jacobi decoding (default: 4)
-            max_iterations: Maximum Jacobi refinement iterations (default: 3)
-            lookahead_steps: Number of lookahead steps (default: 2)
-            temperature: Temperature for softmax (default: 1.0)
-            jacobi_weight: Weight for combining Jacobi and Lookahead results (default: 0.5)
-                         Higher values favor Jacobi decoding
-            
-        Returns:
-            Refined logits tensor combining both strategies
-        """
-        # Get individual decoded logits
-        jacobi_logits = self.jacobi_decode(logits, n_gram_size, max_iterations)
-        lookahead_logits = self.lookahead_decode(logits, lookahead_steps, temperature)
-        
-        # Convert to probabilities for weighted combination
-        jacobi_probs = torch.softmax(jacobi_logits, dim=-1)
-        lookahead_probs = torch.softmax(lookahead_logits, dim=-1)
-        
-        # Combine probabilities with weighted average
-        combined_probs = (jacobi_weight * jacobi_probs + 
-                         (1 - jacobi_weight) * lookahead_probs)
-        
-        return torch.log(combined_probs)  # Convert back to logits
-        
-    def jacobi_decode(self, logits: torch.Tensor, n_gram_size: int = 4, max_iterations: int = 3) -> torch.Tensor:
-        """
-        Implements Jacobi decoding by recursively matching n-grams in the generated sequence.
-        
-        Args:
-            logits: Tensor of shape (batch_size, sequence_length, vocab_size)
-            n_gram_size: Size of n-grams to match (default: 4)
-            max_iterations: Maximum number of refinement iterations (default: 3)
-            
-        Returns:
-            Refined logits tensor
-        """
-        batch_size, seq_len, vocab_size = logits.shape
-        
-        # Initial token probabilities
-        probs = torch.softmax(logits, dim=-1)
-        
-        for _ in range(max_iterations):
-            # Create n-gram windows
-            n_gram_probs = probs.unfold(1, n_gram_size, 1)
-            
-            # Calculate n-gram similarity scores
-            similarity_scores = torch.matmul(
-                n_gram_probs.view(batch_size, -1, n_gram_size * vocab_size),
-                n_gram_probs.view(batch_size, -1, n_gram_size * vocab_size).transpose(-2, -1)
-            )
-            
-            # Update probabilities based on n-gram matches
-            refined_probs = torch.zeros_like(probs)
-            for i in range(seq_len):
-                start_idx = max(0, i - n_gram_size + 1)
-                end_idx = min(seq_len - n_gram_size + 1, i + 1)
-                
-                # Weight probabilities by similarity scores
-                window_scores = similarity_scores[:, start_idx:end_idx, start_idx:end_idx]
-                window_probs = probs[:, start_idx:end_idx]
-                
-                refined_probs[:, i] = torch.matmul(
-                    window_scores.softmax(dim=-1),
-                    window_probs
-                ).mean(dim=1)
-            
-            probs = refined_probs
-            
-        return torch.log(probs)  # Convert back to logits
-        
-    def lookahead_decode(self, logits: torch.Tensor, lookahead_steps: int = 2, temperature: float = 1.0) -> torch.Tensor:
-        """
-        Implements Lookahead decoding by leveraging correlations between generated tokens.
-        
-        Args:
-            logits: Tensor of shape (batch_size, sequence_length, vocab_size)
-            lookahead_steps: Number of steps to look ahead (default: 2)
-            temperature: Temperature for softmax (default: 1.0)
-            
-        Returns:
-            Refined logits tensor
-        """
-        batch_size, seq_len, vocab_size = logits.shape
-        
-        # Initial probabilities
-        probs = torch.softmax(logits / temperature, dim=-1)
-        
-        # Calculate token correlations
-        token_correlations = torch.matmul(probs.transpose(1, 2), probs)  # (batch_size, vocab_size, vocab_size)
-        
-        # Lookahead refinement
-        refined_probs = torch.zeros_like(probs)
-        for i in range(seq_len):
-            current_probs = probs[:, i]
-            
-            # Initialize cumulative probabilities
-            cumulative_probs = current_probs
-            
-            # Look ahead and accumulate probabilities
-            for step in range(1, lookahead_steps + 1):
-                if i + step < seq_len:
-                    next_probs = probs[:, i + step]
-                    # Weight by correlation and distance
-                    weight = 1.0 / (2 ** step)  # Exponential decay
-                    cumulative_probs += weight * torch.matmul(token_correlations, next_probs)
-            
-            refined_probs[:, i] = cumulative_probs / (1 + sum(1.0 / (2 ** s) for s in range(1, lookahead_steps + 1)))
-        
-        return torch.log(refined_probs)  # Convert back to logits
     def get_sequence_len(self, seq):
         return seq.shape[1]
 
@@ -514,6 +404,49 @@ class AirLLMBaseModel(GenerationMixin):
     def run_norm(self, layer, seq):
         return layer(seq)
 
+    def _start_compressed_prefetching(self, layer_names):
+        """Start background thread for prefetching compressed layers"""
+        def prefetch_worker():
+            for layer_name in layer_names:
+                if self.compression:
+                    # Load compressed layer
+                    state_dict = self.load_layer_to_cpu(layer_name)
+                    # Pre-process for quantization
+                    if self.hf_quantizer:
+                        state_dict = self.hf_quantizer.preprocess_state_dict(state_dict)
+                    self.prefetch_queue.put((layer_name, state_dict))
+            self.prefetch_queue.put(None)  # Signal completion
+
+        self.prefetch_thread = threading.Thread(target=prefetch_worker)
+        self.prefetch_thread.daemon = True
+        self.prefetch_thread.start()
+
+    def _start_prefetch_thread(self, next_layer_name):
+        """Start prefetch thread for next layer"""
+        if self.prefetching and not self.thread_running:
+            self.thread_running = True
+            self.prefetch_thread = threading.Thread(
+                target=self._prefetch_worker,
+                args=(next_layer_name,)
+            )
+            self.prefetch_thread.daemon = True
+            self.prefetch_thread.start()
+
+    def _prefetch_worker(self, layer_name):
+        """Worker function to load layer in background"""
+        try:
+            state_dict = self.load_layer_to_cpu(layer_name)
+            self.prefetch_queue.put(state_dict)
+        finally:
+            self.thread_running = False
+
+    def _cleanup_prefetch_thread(self):
+        """Clean up prefetch thread"""
+        if self.prefetch_thread is not None:
+            self.prefetch_thread.join()
+            self.prefetch_thread = None
+            self.thread_running = False
+
     def forward(
             self,
             input_ids: torch.LongTensor = None,
@@ -526,30 +459,7 @@ class AirLLMBaseModel(GenerationMixin):
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
-            decoding_strategy: Optional[str] = None,
-            decoding_kwargs: Optional[dict] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        """Forward pass of the model.
-
-        Args:
-            input_ids: Input token IDs
-            attention_mask: Attention mask
-            position_ids: Position IDs
-            past_key_values: Past key values for KV cache
-            inputs_embeds: Input embeddings
-            labels: Labels for loss computation
-            use_cache: Whether to use KV cache
-            output_attentions: Whether to output attention weights
-            output_hidden_states: Whether to output hidden states
-            return_dict: Whether to return a ModelOutput object
-            decoding_strategy: Decoding strategy to use ("jacobi" or "lookahead")
-            decoding_kwargs: Keyword arguments for the chosen decoding strategy
-                For jacobi: n_gram_size (int), max_iterations (int)
-                For lookahead: lookahead_steps (int), temperature (float)
-
-        Returns:
-            CausalLMOutputWithPast or tuple: Model outputs
-        """
 
         if cache_utils_installed:
             # we don't support kv cache for new version yet
@@ -581,6 +491,14 @@ class AirLLMBaseModel(GenerationMixin):
                 kv_cache_list.append(([], []))
         all_hidden_states = [] * len(self.layers) if output_hidden_states else None
         all_self_attns = [] * len(self.layers) if output_attentions else None
+
+        if self.enable_compressed_prefetch and self.compression:
+            # Start prefetching for next layers
+            self._start_compressed_prefetching(self.layer_names)
+
+        # Start prefetch for first layer
+        if self.prefetching:
+            self._start_prefetch_thread(self.layer_names[0])
 
         with torch.inference_mode(), ThreadPoolExecutor() as executor:
 
@@ -646,7 +564,7 @@ class AirLLMBaseModel(GenerationMixin):
                     if layer_name == self.layer_names_dict['embed']:
                         batch[j] = layer(seq)
                     elif layer_name == self.layer_names_dict['norm']:
-                        #batch[j] = layer(seq[torch.arange(n_seq), batch_eos[j]][:, None])
+                        #batch[j] = layer(seq[torch.arange(n_seq), batch_eos[j]][[:, None])
                         batch[j] = self.run_norm(layer, seq)
 
                         if output_attentions:
@@ -765,7 +683,7 @@ class AirLLMBaseModel(GenerationMixin):
             return tuple(v for v in [logits,
                                      tuple(kv_cache_list) if kv_cache_list is not None else None,
                                      tuple(all_hidden_states) if all_hidden_states is not None else None,
-                                     tuple(all_self_attns) if all_self_attns is not None else None] if v is not None)
+                                     tuple(all_self_attns) if all_hidden_states is not None else None] if v is not None)
         if self.profiling_mode:
             forward_elapsed_time = time.process_time() - forward_start
             forward_elapsed_time_wall = time.time() - forward_start_wall
@@ -777,16 +695,13 @@ class AirLLMBaseModel(GenerationMixin):
 
             self.profiler.clear_profiling_time()
 
+        # Clean up prefetching
+        if self.prefetch_thread:
+            self.prefetch_thread.join()
+            self.prefetch_queue = Queue(maxsize=self.prefetch_queue_size)
 
-        # Apply decoding strategy if specified
-        if decoding_strategy is not None:
-            decoding_kwargs = decoding_kwargs or {}
-            if decoding_strategy == "jacobi":
-                logits = self.jacobi_decode(logits, **decoding_kwargs)
-            elif decoding_strategy == "lookahead":
-                logits = self.lookahead_decode(logits, **decoding_kwargs)
-            elif decoding_strategy == "combined":
-                logits = self.combined_decode(logits, **decoding_kwargs)
+        # Cleanup at end
+        self._cleanup_prefetch_thread()
 
         return CausalLMOutputWithPast(
             loss=None,
